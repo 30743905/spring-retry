@@ -28,6 +28,14 @@ import org.springframework.retry.context.RetryContextSupport;
 /**
  * @author Dave Syer
  *
+ * delegate：真正执行的重试策略，由构造方法传入，当重试失败时，则执行熔断策略，默认SimpleRetryPolicy策略
+ * openTimeout：openWindow，熔断器电路打开的超时时间，当超过openTimeout之后熔断器电路变成半打开状态（主要有一次重试成功，则闭合电路），默认5000毫秒
+ * resetTimeout：timeout，重置熔断器重新闭合的超时时间。默认20000毫秒
+ *
+ * 当重试失败，且在熔断器打开时间窗口[0,openWindow) 内，立即熔断
+ * 当重试失败，且超过timeout，熔断器电路重新闭合
+ * 在熔断器半打开状态[openWindow, timeout] 时，只要重试成功则重置上下文，断路器闭合
+ *
  */
 @SuppressWarnings("serial")
 public class CircuitBreakerRetryPolicy implements RetryPolicy {
@@ -75,13 +83,19 @@ public class CircuitBreakerRetryPolicy implements RetryPolicy {
 	public boolean canRetry(RetryContext context) {
 		CircuitBreakerRetryContext circuit = (CircuitBreakerRetryContext) context;
 		if (circuit.isOpen()) {
+			System.out.println("open::::::::::");
 			circuit.incrementShortCircuitCount();
 			return false;
 		}
 		else {
+			System.out.println("reset::::::::::");
 			circuit.reset();
 		}
-		return this.delegate.canRetry(circuit.context);
+		boolean ret = this.delegate.canRetry(circuit.context);
+		logger.info("CircuitBreaker ret:" + ret);
+
+
+		return ret;
 	}
 
 	@Override
@@ -141,32 +155,68 @@ public class CircuitBreakerRetryPolicy implements RetryPolicy {
 			return context;
 		}
 
+		/**
+		 * 比如：openTimeout=5000,resetTimeout=10000
+		 * 理解：熔断是：5s内失败10次，那么开启熔断（熔断的恢复时间时10s）。
+		 *
+		 * 大于等于10次时：
+		 * 		1.1 时间大于10s，那么关闭熔断器并重置失败次数和计时时间；
+		 * 		1.2 时间小于5s，那么开启熔断器快速失败，并重置计时时间；
+		 * 		1.3 时间[5,10]内，开启熔断器快速失败；
+		 *
+		 * 小于10次时：
+		 * 		2.1 时间大于5s，那么重置失败次数和计时时间；
+		 * 		2.2 时间小于5s，继续执行业务逻辑（不做处理）；
+		 *
+		 * 若开启了熔断后，请求会快速失败，若是1.2情况，那么后续的请求间隔时间必须大于5s，否则的话，每次请求进入均重置startTime，
+		 * 若两次请求间隔小于openTimeout（A请求将当前时间设置为startTime，B请求立刻进入System.currentTimeMillis() - this.start依旧会小于this.openWindow），
+		 * 那么每次都会进入else if (time < this.openWindow)判断，直接进行熔断。
+		 *
+		 * 注：10次是SimpleRetryPolicy配置的失败次数；5s是openTimeout时间；10s是resetTimeout时间。
+		 *
+		 *
+		 *
+		 * @return
+		 */
 		public boolean isOpen() {
+			//start是new context()时获取的
 			long time = System.currentTimeMillis() - this.start;
+			//根据熔断器内部策略，判断是否有重试的次数（注意次数全局共享）
 			boolean retryable = this.policy.canRetry(this.context);
-			if (!retryable) {
+			logger.info("===> retryable:"+retryable);
+			if (!retryable) {//没有次数
+				//间隔时间大于配置的resetTimeout时间，那么关闭熔断
 				if (time > this.timeout) {
-					logger.trace("Closing");
+					logger.info("===> Closing");
+					//重新创建context对象（次数归0）
 					this.context = createDelegateContext(policy, getParent());
+					//重置startTime
 					this.start = System.currentTimeMillis();
 					retryable = this.policy.canRetry(this.context);
 				}
-				else if (time < this.openWindow) {
+				else if (time < this.openWindow) {//间隔时间小于openTimeout，那么每次重置startTime，且打开断路器
 					if (!hasAttribute(CIRCUIT_OPEN) || (Boolean) getAttribute(CIRCUIT_OPEN) == false) {
-						logger.trace("Opening circuit");
+						logger.info("===> Opening circuit");
 						setAttribute(CIRCUIT_OPEN, true);
 						this.start = System.currentTimeMillis();
 					}
-
 					return true;
 				}
+				else{
+					logger.info("===> 注意，这里是 大于openTimeout且小于resetTimeout，直接指向降级方案");//todo
+				}
+				//注意，这里是 大于openTimeout且小于resetTimeout，直接指向降级方案。
 			}
 			else {
+				//可以理解为:配置(10s失败5次，开启熔断。但是大于10s都没失败5次，那么重新构建context对象)
 				if (time > this.openWindow) {
-					logger.trace("Resetting context");
+					logger.info("===> Resetting context");
 					this.start = System.currentTimeMillis();
 					this.context = createDelegateContext(policy, getParent());
+				}else{
+					logger.info("===> else-小于10s且没失败5次的情况下，放行执行业务逻辑");
 				}
+				//else-小于10s且没失败5次的情况下，放行执行业务逻辑。
 			}
 			if (logger.isTraceEnabled()) {
 				logger.trace("Open: " + !retryable);

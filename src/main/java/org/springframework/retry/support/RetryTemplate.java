@@ -271,10 +271,21 @@ public class RetryTemplate implements RetryOperations {
 	protected <T, E extends Throwable> T doExecute(RetryCallback<T, E> retryCallback,
 			RecoveryCallback<T> recoveryCallback, RetryState state) throws E, ExhaustedRetryException {
 
+		//重试策略
 		RetryPolicy retryPolicy = this.retryPolicy;
+		//重试回避策略
 		BackOffPolicy backOffPolicy = this.backOffPolicy;
 
 		// Allow the retry policy to initialise itself...
+		/**
+		 * 创建RetryContext
+		 * 1、如果是无状态，则调用RetryPolicy.open方法创建，一般是new创建一个新的context
+		 * 2、如果是有状态，这里分为两种情况：
+		 * 		a、isForceRefresh=true(强制刷新创建)：则也是调用RetryPolicy.open方法创建，
+		 * 			然后将state设置到context中，并将context缓存到retryContextCache中
+		 * 		b、isForceRefresh=false(使用缓存)：优先从retryContextCache缓存中获取context，没有则进行【步骤2】创建context
+		 *
+		 */
 		RetryContext context = open(retryPolicy, state);
 		if (this.logger.isTraceEnabled()) {
 			this.logger.trace("RetryContext retrieved: " + context);
@@ -282,6 +293,9 @@ public class RetryTemplate implements RetryOperations {
 
 		// Make sure the context is available globally for clients who need
 		// it...
+		/**
+		 * 内部通过ThreadLocal保存context
+		 */
 		RetrySynchronizationManager.register(context);
 
 		Throwable lastException = null;
@@ -290,6 +304,9 @@ public class RetryTemplate implements RetryOperations {
 		try {
 
 			// Give clients a chance to enhance the context...
+			/**
+			 * 调用RetryListener#open，第一次执行调用，如果有返回false则抛出TerminatedRetryException异常
+			 */
 			boolean running = doOpenInterceptors(retryCallback, context);
 
 			if (!running) {
@@ -305,6 +322,7 @@ public class RetryTemplate implements RetryOperations {
 			}
 
 			if (backOffContext == null) {
+				//创建BackOffContext并放入到context中
 				backOffContext = backOffPolicy.start(context);
 				if (backOffContext != null) {
 					context.setAttribute("backOffContext", backOffContext);
@@ -326,24 +344,28 @@ public class RetryTemplate implements RetryOperations {
 					// Reset the last exception, so if we are successful
 					// the close interceptors will not think we failed...
 					lastException = null;
+					//调用RetryCallback#doWithRetry，该方法包装用户业务逻辑
 					return retryCallback.doWithRetry(context);
 				}
 				catch (Throwable e) {
-
+					//保存抛出异常
 					lastException = e;
 
 					try {
+						//将异常注册到RetryContext中,RetryContext#getLastThrowable可以获取到该异常
 						registerThrowable(retryPolicy, state, context, e);
 					}
 					catch (Exception ex) {
 						throw new TerminatedRetryException("Could not register throwable", ex);
 					}
 					finally {
+						//调用RetryListener#onError方法
 						doOnErrorInterceptors(retryCallback, context, e);
 					}
 
 					if (canRetry(retryPolicy, context) && !context.isExhaustedOnly()) {
 						try {
+							//如果需要重试，则进行回避策略，即Thread.sleep休眠一定时间后再进行重试
 							backOffPolicy.backOff(backOffContext);
 						}
 						catch (BackOffInterruptedException ex) {
@@ -360,6 +382,14 @@ public class RetryTemplate implements RetryOperations {
 						this.logger.debug("Checking for rethrow: count=" + context.getRetryCount());
 					}
 
+					/**
+					 * shouldRethrow：确认是否需要重新抛出(对于有事务的逻辑，重新抛出指定异常方便事务回滚)
+					 * 返回true条件：
+					 * 	1、有状态重试
+					 * 	2、state.rollbackFor(context.getLastThrowable() == true
+					 *
+					 * 	注意：shouldRethrow=true时，是不会执行handleRetryExhausted()逻辑，即不会执行RecoveryCallback
+					 */
 					if (shouldRethrow(retryPolicy, context, state)) {
 						if (this.logger.isDebugEnabled()) {
 							this.logger.debug("Rethrow in retry for policy: count=" + context.getRetryCount());
@@ -384,6 +414,18 @@ public class RetryTemplate implements RetryOperations {
 			}
 
 			exhausted = true;
+			/**
+			 * handleRetryExhausted：处理重试结束逻辑
+			 * 1、将context从缓存移除：只有有状态context才会被缓存，有状态移除缓存分为下面两种情况
+			 * 		有状态 && state.global=false：则移除
+			 * 		有状态 && state.global=true：不需要移除
+			 * 2、返回结果处理，分为三种情况：
+			 * 		a、recoveryCallback != null，回调recoveryCallback作为返回
+			 * 		b、recoveryCallback == null，但是有状态(state != null)：
+			 * 			a1、retryTemplate.throwLastExceptionOnExhausted == true: 抛出lastThrowable异常
+			 * 			a2、retryTemplate.throwLastExceptionOnExhausted == false(默认): 将lastThrowable包装成ExhaustedRetryException抛出
+			 * 		c、无状态(state == null 且 recoveryCallback == null)，将lastThrowable抛出
+			 */
 			return handleRetryExhausted(recoveryCallback, context, state);
 
 		}
@@ -391,6 +433,12 @@ public class RetryTemplate implements RetryOperations {
 			throw RetryTemplate.<E>wrapIfNecessary(e);
 		}
 		finally {
+			/**
+			 * 1、close：调用RetryPolicy.close()，一般是空操作；将context的属性context.closed设置成true
+			 * 			如果是有状态 && state.global == false：retryContextCache缓存移除context
+			 * 2、doCloseInterceptors:回调RetryListener#close()方法
+			 * 3、将之前设置到ThreadLocal中的context移除
+			 */
 			close(retryPolicy, context, state, lastException == null || exhausted);
 			doCloseInterceptors(retryCallback, context, lastException);
 			RetrySynchronizationManager.clear();
@@ -500,6 +548,16 @@ public class RetryTemplate implements RetryOperations {
 	}
 
 	private RetryContext doOpenInternal(RetryPolicy retryPolicy, RetryState state) {
+		/**
+		 * doOpenInternal方法是调用的policy的open方法创建RetryContext
+		 * 比如：SimpleRetryPolicy#open()方法会 new SimpleRetryContext(parent)
+		 * 另外在创建的 时候传入了一个父类 context:RetrySynchronizationManager.getContext()
+		 *
+		 * 那么RetrySynchronizationManager 是在什么时候注册的呢？
+		 * 实在从上面的代码看到，是在 open 方法结束之后，注册的，也就是说，如果同一个线程可如果多次重试，那么 context 是会保留的下来的，是一个链式结构。
+		 * 在多个Context 之间可以共享 state 而这个 state 可以放到外边，多个template 可以共享一个state
+		 * 当我们的 state 状态设置成 不强制刷新，则会从 this.retryContextCache 中去寻找相关key对应的context用来复用，这样一来就实现了 多个context 共享一个 state.
+		 */
 		RetryContext context = retryPolicy.open(RetrySynchronizationManager.getContext());
 		if (state != null) {
 			context.setAttribute(RetryContext.STATE_KEY, state.getKey());
@@ -532,18 +590,28 @@ public class RetryTemplate implements RetryOperations {
 	protected <T> T handleRetryExhausted(RecoveryCallback<T> recoveryCallback, RetryContext context, RetryState state)
 			throws Throwable {
 		context.setAttribute(RetryContext.EXHAUSTED, true);
+
+		/**
+		 * 如果有状态，但是state.global=false，从缓存中移除context
+		 */
 		if (state != null && !context.hasAttribute(GLOBAL_STATE)) {
 			this.retryContextCache.remove(state.getKey());
 		}
+
+		//recoveryCallback != null，回调
 		if (recoveryCallback != null) {
 			T recovered = recoveryCallback.recover(context);
 			context.setAttribute(RetryContext.RECOVERED, true);
 			return recovered;
 		}
+
+		//recoveryCallback == null，但是有状态(state != null)
 		if (state != null) {
 			this.logger.debug("Retry exhausted after last attempt with no recovery path.");
 			rethrow(context, "Retry exhausted after last attempt with no recovery path");
 		}
+
+		//无状态(state == null 且 recoveryCallback == null)，将lastThrowable抛出
 		throw wrapIfNecessary(context.getLastThrowable());
 	}
 
