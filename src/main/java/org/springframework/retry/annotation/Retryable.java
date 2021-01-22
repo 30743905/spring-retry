@@ -16,6 +16,8 @@
 
 package org.springframework.retry.annotation;
 
+import org.springframework.retry.stats.StatisticsListener;
+
 import java.lang.annotation.Documented;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
@@ -94,6 +96,18 @@ public @interface Retryable {
 	/**
 	 * A unique label for statistics reporting. If not provided the caller may choose to
 	 * ignore it, or provide a default.
+	 *
+	 * 标签，可以RetryContext.getAttribute(RetryContext.NAME)获取，主要用于统计区分，参见{@link StatisticsListener}
+	 * 等价于：context.setAttribute(RetryContext.NAME,"method.key");
+	 *
+	 * template.execute(new RetryCallback<String, RuntimeException>() {
+	 *         @Override
+	 *        public String doWithRetry(RetryContext context) throws RuntimeException {
+	 *            context.setAttribute(RetryContext.NAME,"method.key");
+	 *             return "ok";
+	 *         }
+	 *     });
+	 *
 	 * @return the label for the statistics
 	 */
 	String label() default "";

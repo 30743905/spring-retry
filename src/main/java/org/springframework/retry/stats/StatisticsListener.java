@@ -26,6 +26,8 @@ import org.springframework.retry.policy.CircuitBreakerRetryPolicy;
 /**
  * @author Dave Syer
  *
+ * RetryListener实现拦截器模式，默认提供了StatisticsListener实现重试操作统计分析数据
+ *
  */
 public class StatisticsListener extends RetryListenerSupport {
 
