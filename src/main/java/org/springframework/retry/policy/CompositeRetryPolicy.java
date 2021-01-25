@@ -145,9 +145,9 @@ public class CompositeRetryPolicy implements RetryPolicy {
 		((RetryContextSupport) context).registerThrowable(throwable);
 	}
 
-	private static class CompositeRetryContext extends RetryContextSupport {
+	public static class CompositeRetryContext extends RetryContextSupport {//todo private -> public
 
-		RetryContext[] contexts;
+		public RetryContext[] contexts; //todo default -> public
 
 		RetryPolicy[] policies;
 

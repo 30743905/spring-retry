@@ -45,37 +45,30 @@ public class RetryTemplate4Test {
         CircuitBreakerRetryPolicy retryPolicy =
                 new CircuitBreakerRetryPolicy(new SimpleRetryPolicy(3));
         retryPolicy.setOpenTimeout(6000);
-        retryPolicy.setResetTimeout(12000);
+        retryPolicy.setResetTimeout(30000);
 
-
-        //创建重试工具模板RetryTemplate
         RetryTemplate retryTemplate = RetryTemplate.builder()
-                .customPolicy(retryPolicy)//重试策略
+                .customPolicy(retryPolicy)
                 .build();
 
-
-        //RetryCallback：包装用于执行的业务逻辑
         RetryCallback<Double, ConnectException> retryCallback = new RetryCallback() {
             public Double doWithRetry(RetryContext context) throws Exception {
                 //RetryCount从0开始
                 logger.info("开始执行业务逻辑，RetryCount:"+context.getRetryCount());
-                //context.setAttribute("time", System.currentTimeMillis());
-                context.setAttribute("state.global", true);
+                //context.setAttribute("state.global", true);
                 return query(context.getRetryCount());
             }
         };
 
-        // 如果RetryCallback执行出现指定异常, 并且超过最大重试次数依旧出现指定异常的话,就执行RecoveryCallback动作
         RecoveryCallback<Double> recoveryCallback = new RecoveryCallback<Double>() {
             public Double recover(RetryContext context) throws Exception {
-                logger.info("*******************>>>do recory operation");
-                return 0.123;
+                logger.info("do recovery operation");
+                throw new RuntimeException("recovery exception");
+                //return 0.123;
             }
         };
 
-        /**
-         * rollbackClassifier == null:即对所有异常都直接抛出
-         */
+        //rollbackClassifier == null:即对所有异常都直接抛出
         RetryState state = new DefaultRetryState("circuit", false);
 
         for(int i=0; i<50; i++){

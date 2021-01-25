@@ -37,6 +37,8 @@ import org.springframework.retry.backoff.BackOffContext;
 import org.springframework.retry.backoff.BackOffInterruptedException;
 import org.springframework.retry.backoff.BackOffPolicy;
 import org.springframework.retry.backoff.NoBackOffPolicy;
+import org.springframework.retry.policy.CircuitBreakerRetryPolicy;
+import org.springframework.retry.policy.CompositeRetryPolicy;
 import org.springframework.retry.policy.MapRetryContextCache;
 import org.springframework.retry.policy.RetryContextCache;
 import org.springframework.retry.policy.SimpleRetryPolicy;
@@ -287,6 +289,16 @@ public class RetryTemplate implements RetryOperations {
 		 *
 		 */
 		RetryContext context = open(retryPolicy, state);
+		CompositeRetryPolicy.CompositeRetryContext compositeRetryContext = (CompositeRetryPolicy.CompositeRetryContext) context;
+		RetryContext[] cts = compositeRetryContext.contexts;
+		for(RetryContext ct:cts){
+			if(ct instanceof CircuitBreakerRetryPolicy.CircuitBreakerRetryContext){
+				logger.info("--------> open context:"+System.identityHashCode(context)+"-->"
+						+System.identityHashCode(ct)+",isOpen:"+((CircuitBreakerRetryPolicy.CircuitBreakerRetryContext)ct).isOpen());
+			}
+
+		}
+
 		if (this.logger.isTraceEnabled()) {
 			this.logger.trace("RetryContext retrieved: " + context);
 		}
@@ -403,6 +415,9 @@ public class RetryTemplate implements RetryOperations {
 				 * A stateful attempt that can retry may rethrow the exception before now,
 				 * but if we get this far in a stateful retry there's a reason for it,
 				 * like a circuit breaker or a rollback classifier.
+				 *
+				 * 如果是有状态重试，且有GLOBAL_STATE属性，则立即跳出重试终止；
+				 * 当抛出的异常是非需要执行回滚操作的异常时，才会执行到此处，CircuitBreakerRetryPolicy会在此跳出循环
 				 */
 				if (state != null && context.hasAttribute(GLOBAL_STATE)) {
 					break;
@@ -417,8 +432,8 @@ public class RetryTemplate implements RetryOperations {
 			/**
 			 * handleRetryExhausted：处理重试结束逻辑
 			 * 1、将context从缓存移除：只有有状态context才会被缓存，有状态移除缓存分为下面两种情况
-			 * 		有状态 && state.global=false：则移除
-			 * 		有状态 && state.global=true：不需要移除
+			 * 		有状态 && context中没有state.global属性：则移除
+			 * 		有状态 && context中有state.global属性：不需要移除
 			 * 2、返回结果处理，分为三种情况：
 			 * 		a、recoveryCallback != null，回调recoveryCallback作为返回
 			 * 		b、recoveryCallback == null，但是有状态(state != null)：
@@ -435,10 +450,11 @@ public class RetryTemplate implements RetryOperations {
 		finally {
 			/**
 			 * 1、close：调用RetryPolicy.close()，一般是空操作；将context的属性context.closed设置成true
-			 * 			如果是有状态 && state.global == false：retryContextCache缓存移除context
+			 * 			有状态 && 重试成功 && context中没有state.global属性：retryContextCache缓存移除context
 			 * 2、doCloseInterceptors:回调RetryListener#close()方法
 			 * 3、将之前设置到ThreadLocal中的context移除
 			 */
+			System.out.println("*********>"+lastException+",exhausted:"+exhausted);
 			close(retryPolicy, context, state, lastException == null || exhausted);
 			doCloseInterceptors(retryCallback, context, lastException);
 			RetrySynchronizationManager.clear();
@@ -469,7 +485,9 @@ public class RetryTemplate implements RetryOperations {
 	protected void close(RetryPolicy retryPolicy, RetryContext context, RetryState state, boolean succeeded) {
 		if (state != null) {
 			if (succeeded) {
+				//有状态 && 重试成功 && context中没有state.global属性，context从retryContextCache移除
 				if (!context.hasAttribute(GLOBAL_STATE)) {
+					logger.info("--------> succeeded, remove context");
 					this.retryContextCache.remove(state.getKey());
 				}
 				retryPolicy.close(context);
@@ -592,7 +610,7 @@ public class RetryTemplate implements RetryOperations {
 		context.setAttribute(RetryContext.EXHAUSTED, true);
 
 		/**
-		 * 如果有状态，但是state.global=false，从缓存中移除context
+		 * 如果有状态，但是context中没有state.global属性，从缓存中移除context
 		 */
 		if (state != null && !context.hasAttribute(GLOBAL_STATE)) {
 			this.retryContextCache.remove(state.getKey());
@@ -606,6 +624,13 @@ public class RetryTemplate implements RetryOperations {
 		}
 
 		//recoveryCallback == null，但是有状态(state != null)
+		/**
+		 * 如果recoveryCallback == null，则分为两种情况：
+		 * 	1、有状态：
+		 * 		throwLastExceptionOnExhausted=true：抛出最后异常
+		 * 		throwLastExceptionOnExhausted=false：则将最后异常包装成ExhaustedRetryException抛出
+		 *  2、无状态：抛出最后异常
+		 */
 		if (state != null) {
 			this.logger.debug("Retry exhausted after last attempt with no recovery path.");
 			rethrow(context, "Retry exhausted after last attempt with no recovery path");
