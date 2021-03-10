@@ -75,6 +75,7 @@ public class MapRetryContextCache implements RetryContextCache {
 	}
 
 	public void put(Object key, RetryContext context) {
+		System.out.println("context放入缓存 key:"+key+", context:"+System.identityHashCode(context)+", size:"+map.size());
 		if (map.size() >= capacity) {
 			throw new RetryCacheCapacityExceededException("Retry cache capacity limit breached. "
 					+ "Do you need to re-consider the implementation of the key generator, "
@@ -84,6 +85,7 @@ public class MapRetryContextCache implements RetryContextCache {
 	}
 
 	public void remove(Object key) {
+		System.out.println("context被移除缓存 key:"+key+", size:"+map.size());
 		map.remove(key);
 	}
 

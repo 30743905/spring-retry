@@ -218,6 +218,69 @@ public class RetryTemplateState2Test {
     }
 
 
+    /**
+     * isForceRefresh：控制从不从缓存获取context
+     * context.setAttribute("state.global", true)：控制的是否将context放入到缓存
+     */
+    @Test
+    public void test033() {
+        //创建重试策略
+        SimpleRetryPolicy policy = new SimpleRetryPolicy(5,
+                Collections.singletonMap(MyException.class, true));
+
+        //创建重试回避策略
+        ExponentialBackOffPolicy backOffPolicy = new ExponentialBackOffPolicy();
+        backOffPolicy.setInitialInterval(100);
+        backOffPolicy.setMaxInterval(2000);
+
+        //当前状态的名称，当把状态放入缓存时，通过该key查询获取
+        Object key = "mykey";
+        //是否每次都重新生成上下文还是从缓存中查询，即是否为全局模式（如熔断器策略时从缓存中查询）
+        boolean isForceRefresh = false;  //true为每次重新生成
+        //对DataAccessException进行回滚
+        BinaryExceptionClassifier rollbackClassifier =
+                new BinaryExceptionClassifier(Collections.singleton(IllegalAccessException.class));
+        RetryState state = new DefaultRetryState(key, isForceRefresh, rollbackClassifier);
+
+
+        //创建重试工具模板RetryTemplate
+        RetryTemplate retryTemplate = RetryTemplate.builder()
+                .customPolicy(policy)//重试策略
+                .customBackoff(backOffPolicy)//回避策略
+                .build();
+
+        //RetryCallback：包装用于执行的业务逻辑
+        RetryCallback<Double, ConnectException> retryCallback = new RetryCallback() {
+            public Double doWithRetry(RetryContext context) throws Exception {
+                log.info("开始执行业务逻辑，RetryCount:" + context.getRetryCount()+", "+System.identityHashCode(context));
+                context.setAttribute("state.global", true); //todo  有区别
+                return query3(context.getRetryCount());
+            }
+        };
+
+        RecoveryCallback<Double> recoveryCallback = new RecoveryCallback<Double>() {
+            public Double recover(RetryContext context) throws Exception {
+                System.out.println("调用RecoveryCallback:"+System.identityHashCode(context));
+                throw new RuntimeException("recover exception");
+            }
+        };
+
+        for(int i=0;i<10;i++){
+            try {
+                System.out.println("=======begin::::"+i);
+                Double ret = retryTemplate.execute(retryCallback, recoveryCallback, state);
+                log.info("获取到返回值++>>>：" + ret);
+            } catch (Exception e) {
+                log.error("执行异常::>>>", e);
+            }
+        }
+
+
+        System.out.println("========finish");
+
+    }
+
+
     private Double query4(int count) throws MyException {
         long time = System.currentTimeMillis();
         log.info("================>>>>业务逻辑开始执行, time:"+time);

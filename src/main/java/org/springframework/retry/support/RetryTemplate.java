@@ -417,7 +417,7 @@ public class RetryTemplate implements RetryOperations {
 				 * like a circuit breaker or a rollback classifier.
 				 *
 				 * 如果是有状态重试，且有GLOBAL_STATE属性，则立即跳出重试终止；
-				 * 当抛出的异常是非需要执行回滚操作的异常时，才会执行到此处，CircuitBreakerRetryPolicy会在此跳出循环
+				 * 当抛出的异常是需要外部感知，比如事务回滚等，才会执行到此处，CircuitBreakerRetryPolicy会在此跳出循环
 				 */
 				if (state != null && context.hasAttribute(GLOBAL_STATE)) {
 					break;
@@ -546,6 +546,7 @@ public class RetryTemplate implements RetryOperations {
 		}
 
 		RetryContext context = this.retryContextCache.get(key);
+		System.out.println("=========context从缓存获取成功, key:"+key+", context:"+System.identityHashCode(context));
 		if (context == null) {
 			if (this.retryContextCache.containsKey(key)) {
 				throw new RetryException("Inconsistent state for failed item: no history found. "
